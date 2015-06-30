@@ -3,20 +3,31 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayDeque;
 
+/**
+ * ThumbStream allows thumbnail extraction from JPEG.
+ * To use it, define the jpeg file when constructing the ThumbStream.
+ * Then read from the stream.
+ * Finally, remember to close the stream to avoid leaks.
+ *
+ * Stuff todo: return info about thumbnail.
+ */
 public class ThumbStream extends InputStream {
 
     // Standard markers
-    // see http://www.media.mit.edu/pia/Research/deepview/exif.html
-    private byte[] EXIF_HEADER = {0x45, 0x78, 0x69, 0x66, 0x00, 0x00}; // Exif<blank><blank>
-    private byte[] MOTOROLA_ALIGN = {0x4d, 0x4d}; // Big-Endian
-    private byte[] INTEL_ALIGN = {0x49, 0x49}; // Little-Endian
-    private byte[] TIFF_HEADER_TAIL = {0x00, 0x00, 0x00, 0x08};
-    private byte[] THUMB_WIDTH = {0x01, 0x00};
-    private byte[] THUMB_HEIGHT = {0x01, 0x01};
-    private byte[] COMPRESSION_TYPE = {0x01, 0x03};
-    private byte[] JPEG_OFFSET = {0x02, 0x01};
-    private byte[] JPEG_SIZE = {0x02, 0x02};
-    private byte[] BIT_PER_SAMPLE = {0x01, 0x02};
+    // @see http://www.media.mit.edu/pia/Research/deepview/exif.html
+    private final int[] JPEG_SOI = {0xff, 0xd8}; // start of image
+    private final int[] JPEG_EOI = {0xff, 0xd9}; // end of image
+    private final int[] EXIF_HEADER = {0x45, 0x78, 0x69, 0x66, 0x00, 0x00}; // Exif<blank><blank>
+    private final int[] MOTOROLA_ALIGN = {0x4d, 0x4d}; // Big-Endian
+    private final int[] INTEL_ALIGN = {0x49, 0x49}; // Little-Endian
+    private final int[] TIFF_HEADER_TAIL = {0x00, 0x00, 0x00, 0x08};
+    // Thumb-markers
+    private final int[] THUMB_WIDTH = {0x01, 0x00};
+    private final int[] THUMB_HEIGHT = {0x01, 0x01};
+    private final int[] COMPRESSION_TYPE = {0x01, 0x03};
+    private final int[] JPEG_OFFSET = {0x02, 0x01};
+    private final int[] JPEG_SIZE = {0x02, 0x02};
+    private final int[] BIT_PER_SAMPLE = {0x01, 0x02};
 
     // other constants
     private final int IFD_ENTRY_SIZE = 12;
@@ -38,7 +49,7 @@ public class ThumbStream extends InputStream {
 
     public ThumbStream(String file) throws IOException {
         in = new FileInputStream(file);
-        bufferQueue = new ArrayDeque<Integer>();
+        bufferQueue = new ArrayDeque<>();
 
         // Look at example results from exiftool
         offset = -IFD_ENTRY_SIZE;
@@ -92,7 +103,7 @@ public class ThumbStream extends InputStream {
 
     @Override
     public int read() throws IOException {
-        if (compressionType == JPEG_COMPRESSION || compressionType == TIFF_COMPRESSION) {
+        if (compressionType == JPEG_COMPRESSION || compressionType == TIFF_COMPRESSION || true /* REMOVE THE TRUE */ && !bufferQueue.isEmpty()) {
             return bufferQueue.pop();
         } else {
             return -1;
@@ -124,6 +135,8 @@ public class ThumbStream extends InputStream {
         int ifd1entries = IFD1Entries(ifd1loc, isBigEndian);
         updateIFD1Entries(ifd1entries, isBigEndian);
 
+        // Get thumbnail data
+        fillBufferQueue(isBigEndian);
     }
 
     private boolean checkEndianess() throws IOException {
@@ -172,9 +185,34 @@ public class ThumbStream extends InputStream {
 
             // Test width
 
-
             // Test heigh
+        }
+    }
 
+    // Fill the buffer queue with the thumnail data
+    // TODO - test for thumbnail data that is not in JPEG format
+    private void fillBufferQueue(boolean isBigEndian) throws IOException {
+        findBytes(JPEG_SOI, true);
+        System.out.println(isBigEndian);
+
+        bufferQueue.add(JPEG_SOI[0]);
+        bufferQueue.add(JPEG_SOI[1]);
+
+        int index = 0;
+        while(true) {
+
+            int b = readFile();
+            if (b == -1) break;
+
+            if (b == JPEG_EOI[index]) {
+                index++;
+            } else {
+                index = 0;
+            }
+
+            bufferQueue.add(b);
+            if (index == JPEG_EOI.length)
+                break;
         }
     }
 
@@ -183,7 +221,7 @@ public class ThumbStream extends InputStream {
 
     }
 
-    private int findBytes(byte[] bytes, boolean isBigEndian) throws IOException {
+    private int findBytes(int[] bytes, boolean isBigEndian) throws IOException {
         int index = 0;
 
         while (true) {
