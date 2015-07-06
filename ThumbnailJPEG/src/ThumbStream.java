@@ -38,72 +38,46 @@ public class ThumbStream extends InputStream {
     // Stream/data related fields
     private FileInputStream in;
     private ArrayDeque<Integer> bufferQueue;
-    private int offset;
+    private int pointer;
+    private boolean isBigEndian;
 
     // Thumbnail info
     private boolean hasThumbnail;
-    private int compressionType;
-    private int thumbLength;
-    private int thumbOffset;
-    private int samplesPerPixel;
+    private ThumbInfo info;
 
     public ThumbStream(String file) throws IOException {
         in = new FileInputStream(file);
         bufferQueue = new ArrayDeque<>();
 
         // Look at example results from exiftool
-        offset = -IFD_ENTRY_SIZE;
+        pointer = -IFD_ENTRY_SIZE;
+        isBigEndian = false;
 
         hasThumbnail = false;
-        compressionType = -1;
 
+        info = new ThumbInfo();
         processThumbnail();
     }
 
+    /**
+     * Returns wheather or not the JPEG has an embedded thumbnail
+     * @return
+     */
     public boolean hasThumbnail() {
         return hasThumbnail;
     }
 
     /**
-     * Get the width of the thumbnail
+     * Return all info about the thumbnail
      * @return
      */
-    public int xThumb() {
-        return -1;
-    }
-
-    /**
-     * Get the height of the thumbnail
-     * @return
-     */
-    public int yThumb() {
-        return -1;
-    }
-
-    /**
-     *
-     * @return
-     */
-    public int getSamplesPerPixel() {
-        if (compressionType == TIFF_COMPRESSION)
-            return samplesPerPixel;
-
-        return -1;
-    }
-
-    /**
-     * Get the type of thumbnail
-     * 6 - JPEG
-     * 1 - TIFF/no compression
-     * @return
-     */
-    public int thumbType() {
-        return compressionType;
+    public ThumbInfo getInfo() {
+        return info;
     }
 
     @Override
     public int read() throws IOException {
-        if (compressionType == JPEG_COMPRESSION || compressionType == TIFF_COMPRESSION || true /* REMOVE THE TRUE */ && !bufferQueue.isEmpty()) {
+        if ((info.getCompressionType() == JPEG_COMPRESSION || info.getCompressionType() == TIFF_COMPRESSION) && !bufferQueue.isEmpty()) {
             return bufferQueue.pop();
         } else {
             return -1;
@@ -124,21 +98,30 @@ public class ThumbStream extends InputStream {
         return null;
     }
 
+    /////////////////////
+    // PRIVATE METHODS //
+    /////////////////////
+
     private void processThumbnail() throws IOException {
         // TODO - check that it is JPEG and has EXIF
 
-        boolean isBigEndian = checkEndianess();
+        isBigEndian = checkEndianess();
 
-        int entries = IFD0Entries(isBigEndian);
-        int ifd1loc = IFD1Location(entries, isBigEndian);
+        int entries = IFD0Entries();
+        int ifd1loc = IFD1Location(entries);
         hasThumbnail = ifd1loc > 0;
-        int ifd1entries = IFD1Entries(ifd1loc, isBigEndian);
-        updateIFD1Entries(ifd1entries, isBigEndian);
+        int ifd1entries = IFD1Entries(ifd1loc);
+        updateIFD1Entries(ifd1entries);
 
         // Get thumbnail data
-        fillBufferQueue(isBigEndian);
+        fillBufferQueue();
     }
 
+    /**
+     * Check whether the JPEG format is in big or little endian.
+     * @return
+     * @throws IOException
+     */
     private boolean checkEndianess() throws IOException {
         findBytes(EXIF_HEADER, true);
 
@@ -156,11 +139,11 @@ public class ThumbStream extends InputStream {
         return endianess;
     }
 
-    /*
+    /**
      * Find TIFF Header and then check IFD0 Entries
      */
-    private int IFD0Entries(boolean isBigEndian) throws IOException {
-        int tiff_tail = findTIFF_HEADER_TAIL(isBigEndian);
+    private int IFD0Entries() throws IOException {
+        int tiff_tail = findTIFF_HEADER_TAIL();
         if (tiff_tail == -1) return -1;
 
         int b_0 = readFile();
@@ -168,8 +151,15 @@ public class ThumbStream extends InputStream {
         return eval(new int[] {b_0, b_1}, isBigEndian);
     }
 
-    private int IFD1Entries(int IFD1Location, boolean isBigEndian) throws IOException {
-        while (offset < IFD1Location)
+    /**
+     * Return the address of the IFD1 entries.
+     * @param IFD1Location
+     * @param isBigEndian
+     * @return
+     * @throws IOException
+     */
+    private int IFD1Entries(int IFD1Location) throws IOException {
+        while (pointer < IFD1Location)
             readFile();
 
         int b_0 = readFile();
@@ -177,23 +167,25 @@ public class ThumbStream extends InputStream {
         return eval(new int[] {b_0, b_1}, isBigEndian);
     }
 
-    private void updateIFD1Entries(int numberEntries, boolean isBigEndian) throws IOException {
+    private void updateIFD1Entries(int numberEntries) throws IOException {
 
         for(int i=0; i < numberEntries; i++) {
             int[] entry = new int[IFD_ENTRY_SIZE];
             readFile(entry);
 
-            // Test width
+            // Test width and height
 
-            // Test heigh
+            // Test compression
+            if (testBytesTuple(entry, COMPRESSION_TYPE)) {
+                info.setCompressionType(entry[9]); // TODO - do not hardcode this
+            }
         }
     }
 
-    // Fill the buffer queue with the thumnail data
+    // Fill the buffer queue with the thumbnail data
     // TODO - test for thumbnail data that is not in JPEG format
-    private void fillBufferQueue(boolean isBigEndian) throws IOException {
+    private void fillBufferQueue() throws IOException {
         findBytes(JPEG_SOI, true);
-        System.out.println(isBigEndian);
 
         bufferQueue.add(JPEG_SOI[0]);
         bufferQueue.add(JPEG_SOI[1]);
@@ -216,11 +208,18 @@ public class ThumbStream extends InputStream {
         }
     }
 
-    private int findTIFF_HEADER_TAIL(boolean isBigEndian) throws IOException {
-        return findBytes(TIFF_HEADER_TAIL, isBigEndian);
+    private int findTIFF_HEADER_TAIL() throws IOException {
+        return findBytes(TIFF_HEADER_TAIL);
 
     }
 
+    /**
+     * Return the pointer position in the JPEG file where the int[] bytes occur + bytes.length
+     * @param bytes
+     * @param isBigEndian
+     * @return
+     * @throws IOException
+     */
     private int findBytes(int[] bytes, boolean isBigEndian) throws IOException {
         int index = 0;
 
@@ -235,12 +234,42 @@ public class ThumbStream extends InputStream {
             }
 
             if (index == bytes.length)
-                return offset;
+                return pointer;
         }
     }
 
+    /**
+     * Return the pointer position in the JPEG file where the int[] bytes occur + bytes.length
+     * Use JPEG endianness
+     * @param bytes
+     * @return
+     * @throws IOException
+     */
+    private int findBytes(int[] bytes) throws IOException {
+        return findBytes(bytes, isBigEndian);
+    }
 
-    private int IFD1Location(int IFD0entries, boolean isBigEndian) throws IOException {
+    /**
+     * Check if b_0 and b_1 are the first bytes in bytes
+     * @param bytes
+     * @param test
+     * @return
+     */
+    private boolean testBytesTuple(int[] bytes, int[] test) {
+        if (bytes.length < 2) return false;
+
+        return (bytes[0] == test[0] && bytes[1] == test[1] && isBigEndian) || (bytes[1] == test[0] && bytes[0] == test[1] && !isBigEndian);
+    }
+
+
+    /**
+     * Find the IFD1 Location address in the JPEG file given the number of IFD0 entries.
+     * This method must be called just after the number of IFD0 entries is found.
+     * @param IFD0entries
+     * @return
+     * @throws IOException
+     */
+    private int IFD1Location(int IFD0entries) throws IOException {
         int ifd0offset = IFD0entries * (IFD_ENTRY_SIZE);
 
         for(int i = 0; i < ifd0offset; i++) {
@@ -252,21 +281,41 @@ public class ThumbStream extends InputStream {
         int b_2 = readFile();
         int b_3 = readFile();
 
-        return eval(new int[] {b_0, b_1, b_2, b_3}, isBigEndian);
+        return eval(new int[]{b_0, b_1, b_2, b_3}, isBigEndian);
     }
 
+    /**
+     * Returns a byte of the embedded file and increases the pointer.
+     * @return
+     * @throws IOException
+     */
     private int readFile() throws IOException {
         int b = in.read();
-        offset++;
+        pointer++;
         return b;
     }
 
+    /**
+     * Read the file to an output array.
+     * @param out
+     * @throws IOException
+     */
     private void readFile(int[] out) throws IOException {
         for(int i = 0; i < out.length; i++)
             out[i] = readFile();
     }
 
+    /**
+     * Evaluate n-bytes stored in value as an integer.
+     * Returns -1 if integer in value overflows the int space.
+     * @param value
+     * @param isBigEndian
+     * @return
+     */
     private int eval(int[] value, boolean isBigEndian) {
+        if (value.length > 4)
+            return -1;
+
         int retval = 0;
         if (isBigEndian) {
             for(int i = value.length - 1, j = 0; i >=0; i--, j++) {
